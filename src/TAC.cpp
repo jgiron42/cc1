@@ -14,6 +14,10 @@ namespace TAC
 		return temps.size() - 1;
 	}
 
+	void TacFunction::set_temp_type(int id, const Types::CType &type) {
+		this->temps[id] = type;
+	}
+
 	void TacFunction::add_instruction(const TAC::Instruction &i) {
 		if (holds_alternative<int>(i.ret))
 			this->last_usage[get<int>(i.ret)] = this->instructions.size();
@@ -68,11 +72,15 @@ namespace TAC
 		return this->op >= ADD && this->op < ASSIGN;
 	}
 
+	bool Instruction::is_oop() const {
+		return this->op >= NEG && this->op <= LOGICAL_NOT;
+	}
+
 	bool Instruction::is_jump() const {
 		return this->op >= JUMP && this->op <= JUMP_GREATER_EQUAL;
 	}
 
-	void TacFunction::print() const {
+	void Instruction::print() const {
 		static const char *instructions_strings[] = {
 				"NO INSTRUCTION",
 				"ADD",
@@ -107,36 +115,39 @@ namespace TAC
 				"PARAM",
 				"CALL",
 		};
+		if (this->op == TAC::JUMP)
+			std::cout << "jump to " << this->ret;
+		else if (this->is_jump())
+		{
+			std::cout << "if (";
+			if (this->oper1.index())
+				std::cout << this->oper1 << " ";
+			std::cout << instructions_strings[this->op];
+			if (this->oper2.index())
+				std::cout << " " << this->oper2;
+			std::cout << ") jump to " << this->ret;
+		}
+		else
+		{
+			if (this->ret.index())
+				std::cout << this->ret << " = ";
+			std::cout << instructions_strings[this->op];
+			if (this->oper1.index())
+				std::cout << " " << this->oper1;
+			if (this->oper2.index())
+				std::cout << " " << this->oper2;
+		}
+		std::cout << std::endl;
+
+	}
+
+	void TacFunction::print() const {
 		for (size_t i = 0; i < instructions.size(); i++) {
-			const auto & instruction = instructions[i];
 			for (size_t j = 0; j < this->labels.size(); j++) // ugly but it is just for debugging
 				if (this->labels[j] == i)
 					std::cout << "l" << j << ": ";
-			if (instruction.op == TAC::JUMP)
-				std::cout << "jump to " << instruction.ret;
-			else if (instruction.is_jump())
-			{
-				std::cout << "if (";
-				if (instruction.oper1.index())
-					std::cout << instruction.oper1 << " ";
-				std::cout << instructions_strings[instruction.op];
-				if (instruction.oper2.index())
-					std::cout << " " << instruction.oper2;
-				std::cout << ") jump to " << instruction.ret;
-			}
-			else
-			{
-				if (instruction.ret.index())
-					std::cout << instruction.ret << " = ";
-				std::cout << instructions_strings[instruction.op];
-				if (instruction.oper1.index())
-					std::cout << " " << instruction.oper1;
-				if (instruction.oper2.index())
-					std::cout << " " << instruction.oper2;
-			}
-			std::cout << std::endl;
+			instructions[i].print();
 		}
-
 	}
 
 	Label TacFunction::new_label(bool here) {

@@ -21,7 +21,8 @@ void comment();
 
 %%
 \/\*([^*]|\*[^/])*\*\/		count(yytext);
-[[:blank:]]*#.*$		count(yytext);
+\/\/.*\n					count(yytext);
+[[:blank:]]*#.*$			count(yytext);
 
 "auto"			{ count(yytext); return(AUTO); }
 "break"			{ count(yytext); return(BREAK); }
@@ -67,7 +68,7 @@ L?'(\\.|[^\\'])+'	{ count(yytext); return std::pair{CONSTANT, symbolTable.new_co
 {D}*"."{D}+({E})?{FS}?	{ count(yytext); return std::pair{CONSTANT, symbolTable.new_constant(std::stod(yytext))}; }
 {D}+"."{D}*({E})?{FS}?	{ count(yytext); return std::pair{CONSTANT, symbolTable.new_constant(std::stod(yytext))}; }
 
-L?\"(\\.|[^\\"])*\"	{ count(yytext); return std::pair{CONSTANT, symbolTable.new_constant(std::string(yytext))};}
+L?\"(\\.|[^\\"])*\"	{ count(yytext); return std::pair{STRING_LITERAL, symbolTable.new_constant(std::string(yytext))};}
 
 "..."			{ count(yytext); return(ELLIPSIS); }
 ">>="			{ count(yytext); return(RIGHT_ASSIGN); }
@@ -117,7 +118,7 @@ L?\"(\\.|[^\\"])*\"	{ count(yytext); return std::pair{CONSTANT, symbolTable.new_
 "?"				{ count(yytext); return('?'); }
 
 [ \t\v\n\f]		{ count(yytext); }
-.			{ printf("bad char\n"); /* ignore bad characters */ }
+.			{ count(yytext); return error; }
 
 %%
 
@@ -127,22 +128,45 @@ int yywrap()
 }
 
 
+int old_column = 0;
 int column = 0;
+int line = 0;
+std::string	current_line;
 
 void count(char *yytext)
 {
 	int i;
 
+	current_line.append(yytext);
+	while (current_line.find('\n') != std::string::npos && current_line.find('\n') != current_line.size() - 1)
+		current_line.erase(0, current_line.find('\n') + 1);
+	old_column = column;
 	for (i = 0; yytext[i] != '\0'; i++)
 		if (yytext[i] == '\n')
+		{
 			column = 0;
+			line++;
+		}
 		else if (yytext[i] == '\t')
 			column += 8 - (column % 8);
 		else
 			column++;
-	ECHO;
 }
 
+extern std::shared_ptr<yyLexer> lexer;
+
+void	finish_line()
+{
+	std::stack<char> unput_stack;
+	while (!current_line.ends_with('\n'))
+	{
+		char c = lexer->input();
+		current_line.push_back(c);
+		unput_stack.push(c);
+	}
+	for (;!unput_stack.empty();unput_stack.pop())
+		lexer->unput(unput_stack.top());
+}
 
 int check_type(char *s)
 {
@@ -160,7 +184,7 @@ int	parse_literal(const std::string &s)
 	if (s[2] == 'x')
 	{
 		int n = 0;
-		for (int i = 3;s[i]; i++)
+		for (int i = 3;s[i] != '\''; i++)
 		{
 			n *= 16;
 			if (isdigit(s[i]))
@@ -175,8 +199,11 @@ int	parse_literal(const std::string &s)
 	else if (s[2] >= '0' && s[2] <= '8')
 	{
 		int n = 0;
-		for (int i = 2;s[i]; i++)
+		int i;
+		for (i = 2;s[i] >= '0' && s[i] <= '8'; i++)
 			n = n * 8 + s[i] - '0';
+		if (s[i] != '\'')
+			return -1;
 		return n;
 	}
 	else switch (s[2])
@@ -198,6 +225,6 @@ int	parse_literal(const std::string &s)
 			case 'v':
 				return '\v';
 			default:
-				return s[1];
+				return s[2];
 		}
 }

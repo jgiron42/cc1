@@ -11,30 +11,29 @@ namespace CodeGeneration
 	using enum Register;
 
 	std::string FunctionGenerator::indirection_to_string(const Indirection &i) {
-		const auto &l_base = get_address_location(i.base);
-		const auto &l_index = get_address_location(i.index);
-		if	(l_base.type != Operand::REGISTER ||
-			(l_index.type != Operand::IMMEDIATE && l_index.type != Operand::REGISTER))
+		if	((i.base.type != Operand::REGISTER && i.base.type != Operand::DIRECT) ||
+			(i.index.type != Operand::IMMEDIATE && i.index.type != Operand::REGISTER))
 			throw std::runtime_error("shouldn't be reached");
-		return "[" + operand_to_string(l_base) + "+" + operand_to_string(l_index) + "*" + std::to_string(i.scale) + "+" + std::to_string(i.displacement) + "]";
+		return "[" + operand_to_string(i.base, true) + "+" + operand_to_string(i.index, true) + "*" + std::to_string(i.scale) + "+" + std::to_string(i.displacement) + "]";
 	}
 
-	std::string FunctionGenerator::operand_to_string(const Operand &a) {
+	std::string FunctionGenerator::operand_to_string(const Operand &a, bool is_sub_operand = false) { // todo: bof bof
 		switch (a.type)
 		{
 			case Operand::REGISTER:
 				return registers_strings[static_cast<int>(a.reg)];
 			case Operand::INDIRECT: {
-				const auto &l_base = get_address_location(a.indirection->base);
-				const auto &l_index = get_address_location(a.indirection->index);
-				if (l_base.type != Operand::REGISTER ||
-					(l_index.type != Operand::IMMEDIATE &&
-					l_index.type != Operand::REGISTER))
+				if ((a.indirection->base.type != Operand::REGISTER && a.indirection->base.type != Operand::DIRECT) ||
+					(a.indirection->index.type != Operand::IMMEDIATE &&
+							a.indirection->index.type != Operand::REGISTER))
 					throw std::runtime_error("shouldn't be reached");
 				return operand_size_str[a.indirection->scale] + " PTR " + indirection_to_string(*a.indirection);
 			}
 			case Operand::DIRECT:
-				return a.label;
+				if (is_sub_operand)
+					return a.label;
+				else
+					return "OFFSET " + a.label;
 			case Operand::IMMEDIATE:
 				return std::to_string(a.immediate_value);
 			default:
@@ -60,16 +59,17 @@ namespace CodeGeneration
 				ECX,
 				EDX,
 		};
-		this->available_registers = decltype(this->available_registers)(registers.begin(), registers.end(), &compare_reg);
+//		this->available_registers = decltype(this->available_registers)(registers.begin(), registers.end(), &compare_reg);
 	}
 
 	void FunctionGenerator::spill(const CodeGeneration::Register &r) {
+//		printf("spill\n");
 		auto it = this->allocated_registers.find(r);
 		if (it == this->allocated_registers.end())
 			return;
 		this->put_instruction("push", r);
 		this->frame_size += 8;
-		this->map_variables[it->second] = Operand(new Indirection{"@rbp", NULL_CONSTANT, 8, -(ssize_t)this->frame_size});
+		this->map_variables[it->second] = Operand(new Indirection{GET_SUB_REG(RBP, REG_SIZE), 0, 8, -(ssize_t)this->frame_size});
 		this->allocated_registers.erase(r);
 	}
 
@@ -94,23 +94,35 @@ namespace CodeGeneration
 		available_registers.insert(r);
 	}
 
-	Operand FunctionGenerator::temp_to_operand(int temp) {
+	Operand FunctionGenerator::alloc_temporary(size_t size) {
 		Operand mapping;
 		try { // map on register
-			Register r = GET_SUB_REG(alloc_register(), symbolTable.size_of(this->function.tac->temps[temp]));
-			printf("size: %zu %s\n", symbolTable.size_of(this->function.tac->temps[temp]), registers_strings[int(r)]);
+			Register r = GET_SUB_REG(alloc_register(), size);
+//			printf("size: %zu %s\n", size, registers_strings[int(r)]);
 			mapping.type = Operand::REGISTER;
 			mapping.reg = r;
 		}
 		catch (std::exception&) // no more registers, map on stack
 		{
-			this->put_instruction("push", 0);
+//			this->put_instruction("push", 0); todo
 			mapping.type = Operand::INDIRECT;
-			auto *i = new Indirection {"@rbp", NULL_CONSTANT, symbolTable.size_of(this->function.tac->temps[temp]), -(ssize_t)this->frame_size};
-			this->frame_size += i->scale;
+			this->frame_size += size;
+			auto *i = new Indirection {GET_SUB_REG(RBP, REG_SIZE), 0, size, -(ssize_t)this->frame_size};
+//			this->frame_size += PTR_SIZE;
 			mapping.indirection = std::shared_ptr<Indirection>(i);
 		}
 		return mapping;
+	}
+
+	Operand FunctionGenerator::temp_to_operand(int temp) {
+		if (holds_alternative<Types::FunctionType>(this->function.tac->temps[temp].type))
+			return alloc_temporary(PTR_SIZE); // todo
+		else
+		{
+			auto ret = alloc_temporary(symbolTable.size_of(this->function.tac->temps[temp]));
+			ret.is_signed = Types::is_signed(this->function.tac->temps[temp]);
+			return ret;
+		}
 	}
 
 	Operand FunctionGenerator::address_to_operand(const TAC::Address &addr) {
@@ -124,29 +136,41 @@ namespace CodeGeneration
 				ret = temp_to_operand(get<int>(addr));
 				break;
 			case 2:
-				ret = Operand(new Indirection{"@rbp", NULL_CONSTANT, symbolTable.size_of(get<SymbolTable::Ordinary *>(addr)->type), -get<SymbolTable::Ordinary *>(addr)->offset});
+			{
+				auto &o = get<SymbolTable::Ordinary *>(addr);
+				if (o->storage == SymbolTable::Ordinary::AUTO)
+					ret = Operand(new Indirection{GET_SUB_REG(RBP, REG_SIZE), 0, symbolTable.size_of(o->type), -o->offset},
+								  Types::is_signed(o->type));
+				else
+					ret = Operand(new Indirection{o->name, 0, symbolTable.size_of(o->type), 0}, Types::is_signed(o->type));
+			}
 				break;
 			case 3:
 			{
 				const auto &constant = get<const SymbolTable::Constant *>(addr);
 				switch (constant->value.index()) {
 					case 0:
-						ret = {".LC" + std::to_string(constant->id) + "@GOTPCREL[rip]"};
+						ret = {".LC" + std::to_string(constant->id), Types::is_signed(constant->type)};
 				break;
 					case 1:
-						ret = {get<uintmax_t>(constant->value)};
+						ret = {get<uintmax_t>(constant->value), Types::is_signed(constant->type)};
 				break;
 					case 2:
-						ret = {".LC" + std::to_string(constant->id) + "@GOTPCREL[rip]"};
+						ret = {".LC" + std::to_string(constant->id), Types::is_signed(constant->type)};
 					break;
 				}
 				break;
 			}
 			case 4:
-				ret = {".L" + std::to_string(get<4>(addr))};
+				if (!map_labels.contains(get<4>(addr)))
+					map_labels[get<4>(addr)] = gen.get_label();
+				ret = {".L" + std::to_string(map_labels[get<4>(addr)])};
 				break;
 			case 5:
-				ret = {get<5>(addr) + "@GOTPCREL[rip]"};
+				Types::CType type = symbolTable.retrieve_ordinary(get<5>(addr))->type;
+//				symbolTable.sym
+				ret = Operand(new Indirection{get<5>(addr), 0, symbolTable.size_of(type), 0}, Types::is_signed(type));
+//				ret = {"OFFSET " + get<5>(addr)};
 				break;
 		}
 		if (ret.type == Operand::REGISTER)
@@ -154,16 +178,15 @@ namespace CodeGeneration
 		return ret;
 	}
 
+	std::map<TAC::Address, Operand>::iterator	FunctionGenerator::add_mapping(const TAC::Address &addr, Operand &&op)
+	{
+		return this->map_variables.insert({addr, op}).first;
+	}
+
 	Operand FunctionGenerator::get_address_location(const TAC::Address &addr) {
-		std::cout << "enter get_address_location" << std::endl;
-		if (holds_alternative<std::string>(addr))
-			std::cout << "get addr for " << get<std::string>(addr) << std::endl;
-		if (holds_alternative<SymbolTable::Ordinary *>(addr))
-			std::cout << "get addr for " << get<SymbolTable::Ordinary *>(addr)->name << " " << get<SymbolTable::Ordinary *>(addr) << std::endl;
 		if (auto it = this->map_variables.find(addr); it != this->map_variables.end())
 			return it->second;
-		std::cout << "zbeub " << std::endl;
-		return this->map_variables.insert({addr, address_to_operand(addr)}).first->second;
+		return add_mapping(addr, address_to_operand(addr))->second;
 	}
 
 	void FunctionGenerator::free_temp(int temp) {
@@ -178,7 +201,9 @@ namespace CodeGeneration
 	}
 
 	void FunctionGenerator::translate_bop(const TAC::Instruction &i) {
-		Register left = GET_SUB_REG(EAX, size_of(i.ret)), right = GET_SUB_REG(EBX, size_of(i.ret));
+		Operand left(GET_SUB_REG(EAX, i.operation_size), i.operation_sign);
+		Operand right(GET_SUB_REG(EBX, i.operation_size), i.operation_sign);
+		Operand ret = left;
 
 		load(left, i.oper1);
 		load(right, i.oper2);
@@ -192,18 +217,31 @@ namespace CodeGeneration
 				put_instruction("sub", left, right);
 				break;
 			case TAC::MUL:
-				put_instruction("imul", left, right);
-				// todo: sign
+//				put_instruction("mov", GET_SUB_REG(EAX, i.operation_size), left); // todo ???
+				if (i.operation_sign)
+					put_instruction("imul", right);
+				else
+					put_instruction("mul", right);
+//				this->move(ret, GET_SUB_REG(EAX, size_of(i.ret)))
 				break;
 			case TAC::DIV:
-				put_instruction("mov", EAX, left);
-				put_instruction("div", right);
-				put_instruction("mov", left, EAX);
+				put_instruction("xor", GET_SUB_REG(EDX, size_of(i.ret)), GET_SUB_REG(EDX, size_of(i.ret)));
+//				put_instruction("mov", GET_SUB_REG(EAX, size_of(i.ret)), left); // todo ???
+				if (i.operation_sign)
+					put_instruction("idiv", right);
+				else
+					put_instruction("div", right);
+//				put_instruction("mov", left, GET_SUB_REG(EAX, size_of(i.ret)));
 				break;
 			case TAC::MOD:
-				put_instruction("mov", EAX, left);
-				put_instruction("div", right);
-				put_instruction("mov", left, EDX);
+				put_instruction("xor", GET_SUB_REG(EDX, size_of(i.ret)), GET_SUB_REG(EDX, size_of(i.ret)));
+//				put_instruction("mov", GET_SUB_REG(EAX, size_of(i.ret)), left);
+				if (i.operation_sign)
+					put_instruction("idiv", right);
+				else
+					put_instruction("div", right);
+//				put_instruction("mov", left, GET_SUB_REG(EDX, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(EDX, size_of(i.ret)));
 				break;
 			case TAC::SHIFT_LEFT:
 				put_instruction("shl", left, right);
@@ -220,8 +258,125 @@ namespace CodeGeneration
 			case TAC::BITWISE_OR:
 				put_instruction("or", left, right);
 				break;
+			case TAC::LESSER:
+				put_instruction("cmp", left, right);
+				if (i.operation_sign)
+					put_instruction("setl", GET_SUB_REG(left.reg, 1));
+				else
+					put_instruction("setb", GET_SUB_REG(left.reg, 1));
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+				break;
+			case TAC::LESSER_EQUAL:
+				put_instruction("cmp", left, right);
+				if (i.operation_sign)
+					put_instruction("setle", GET_SUB_REG(left.reg, 1));
+				else
+					put_instruction("setbe", GET_SUB_REG(left.reg, 1));
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+				break;
+			case TAC::GREATER:
+				put_instruction("cmp", left, right);
+				if (i.operation_sign)
+					put_instruction("setg", GET_SUB_REG(left.reg, 1));
+				else
+					put_instruction("seta", GET_SUB_REG(left.reg, 1));
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+				break;
+			case TAC::GREATER_EQUAL:
+				put_instruction("cmp", left, right);
+				if (i.operation_sign)
+					put_instruction("setge", GET_SUB_REG(left.reg, 1));
+				else
+					put_instruction("setae", GET_SUB_REG(left.reg, 1));
+//				this->move(left, GET_SUB_REG(left, 1)) todo ?
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+				break;
+			case TAC::EQUAL:
+				put_instruction("cmp", left, right);
+				put_instruction("sete", GET_SUB_REG(left.reg, 1));
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+				break;
+			case TAC::NOT_EQUAL:
+				put_instruction("cmp", left, right);
+				put_instruction("setne", GET_SUB_REG(left.reg, 1));
+				ret = Operand(GET_SUB_REG(left.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(left.reg, 1));
+//				this->move(left, GET_SUB_REG(left.reg, 1));
+				break;
+			default:
+				std::cerr << "unknown tac instruction!" << std::endl;
 		}
-		store(i.ret, left);
+		store(i.ret, ret);
+	}
+
+
+	void FunctionGenerator::translate_oop(const TAC::Instruction &i) {
+		Operand reg(GET_SUB_REG(EAX, i.operation_size), i.operation_sign);
+		Operand ret = reg;
+
+		load(reg, i.oper1);
+		switch (i.op)
+		{
+			case TAC::LOGICAL_NOT:
+				put_instruction("cmp", reg, 0);
+				put_instruction("sete", GET_SUB_REG(reg.reg, 1));
+				ret = Operand(GET_SUB_REG(reg.reg, size_of(i.ret)));
+				this->move(ret, GET_SUB_REG(reg.reg, 1));
+				break;
+			case TAC::BITWISE_NOT:
+				put_instruction("not", reg);
+				break;
+			case TAC::NEG:
+				put_instruction("neg", reg);
+				break;
+			default:
+				std::cerr << "unknown tac instruction!" << std::endl;
+		}
+		store(i.ret, ret);
+	}
+
+
+	void FunctionGenerator::translate_logical_operator(const TAC::Instruction &i) {
+		switch (i.op)
+		{
+			case TAC::LOGICAL_AND: // todo
+			{
+				put_instruction("cmp", get_address_location(i.oper1), 0);
+				put_instruction("setne", AL);
+				put_instruction("cmp", get_address_location(i.oper2), 0);
+				put_instruction("setne", BL);
+				put_instruction("and", AL, BL);
+				this->move(GET_SUB_REG(RAX, REG_SIZE), AL);
+				this->store(i.ret, GET_SUB_REG(RAX, REG_SIZE));
+				break;
+			}
+			case TAC::LOGICAL_OR: // todo
+			{
+				put_instruction("cmp", get_address_location(i.oper1), 0);
+				put_instruction("setne", AL);
+				put_instruction("cmp", get_address_location(i.oper2), 0);
+				put_instruction("setne", BL);
+				put_instruction("or", AL, BL);
+				this->move(GET_SUB_REG(RAX, REG_SIZE), AL);
+				this->store(i.ret, GET_SUB_REG(RAX, REG_SIZE));
+				break;
+			}
+			case TAC::LOGICAL_NOT:
+			{
+				put_instruction("cmp", get_address_location(i.oper1), 0);
+				put_instruction("sete", AL);
+				this->move(GET_SUB_REG(RAX, REG_SIZE), AL);
+				this->store(i.ret, GET_SUB_REG(RAX, REG_SIZE));
+				break;
+			}
+			default:
+				std::cerr << "unknown tac instruction!" << std::endl;
+		}
 	}
 
 	void FunctionGenerator::translate_jump(const TAC::Instruction &i) {
@@ -229,12 +384,13 @@ namespace CodeGeneration
 			throw std::runtime_error("no dst for label l" + std::to_string(get<TAC::Label>(i.ret)));
 
 		if (i.op != TAC::JUMP) {
-			Register left = EAX, right = EBX;
+			Operand left(GET_SUB_REG(EAX, i.operation_size), i.operation_sign);
+			Operand right(GET_SUB_REG(EBX, i.operation_size), i.operation_sign);
 			load(left, i.oper1);
 			load(right, i.oper2);
 			this->put_instruction("cmp", left, right);
 		}
-		std::string opcodes[] = {
+		std::string opcodes[] = { // todo sign
 				"jmp",
 				"je",
 				"jne",
@@ -247,15 +403,7 @@ namespace CodeGeneration
 	}
 
 	void FunctionGenerator::add_param(const TAC::Instruction &i) {
-		if (param_pos < sizeof(param_registers) / sizeof (*param_registers))
-		{
-			this->spill(param_registers[param_pos]);
-			CLEAN_REG(param_registers[param_pos]);
-			this->load(GET_SUB_REG(param_registers[param_pos], size_of(get_address_location(i.oper1))), i.oper1);
-			param_pos++;
-		}
-		else
-			this->stack_args.push(get_address_location(i.oper1));
+		this->stack_args.push(i);
 	}
 
 	size_t	FunctionGenerator::size_of(const Operand &o)
@@ -267,9 +415,9 @@ namespace CodeGeneration
 			case Operand::INDIRECT:
 				return o.indirection->scale;
 			case Operand::DIRECT:
-				return 8; // todo
+				return REG_SIZE; // todo
 			case Operand::IMMEDIATE:
-				return 8; // todo
+				return REG_SIZE; // todo
 			default:
 				throw std::runtime_error("shouldn't be reached");
 		}
@@ -281,85 +429,178 @@ namespace CodeGeneration
 	}
 
 	void FunctionGenerator::call(const TAC::Instruction &i) {
-		this->load(RAX, i.oper1);
+//		auto addr = get_address_location(i.oper1);
+//		if ()`
+//		assert(addr.type == Operand::INDIRECT);
+//		addr = addr.indirection->base; // todo?
+		this->load(GET_SUB_REG(RAX, REG_SIZE), i.oper1);
+
 		size_t padding = (16 - (this->frame_size % 16)) % 16;
-		if (padding)
-			this->put_instruction("sub", RSP, padding); // todo
+//		if (padding)
+//			this->put_instruction("sub", GET_SUB_REG(RSP, REG_SIZE), padding); // todo
+		this->put_instruction("sub", GET_SUB_REG(RSP, REG_SIZE), frame_size + padding);
+
 		for (;!this->stack_args.empty(); this->stack_args.pop())
-			this->put_instruction("push", this->stack_args.top());
-		this->put_instruction("call", RAX);
-		if (padding)
-			this->put_instruction("add", RSP, padding);
+		{
+			this->load({GET_SUB_REG(RBX, this->stack_args.top().operation_size), this->stack_args.top().operation_sign}, this->stack_args.top().oper1);
+			this->put_instruction("push", GET_SUB_REG(RBX, REG_SIZE));
+		}
+		this->put_instruction("call", GET_SUB_REG(RAX, REG_SIZE));
+
+//		if (padding)
+//			this->put_instruction("add", GET_SUB_REG(RSP, REG_SIZE), padding);
+		this->put_instruction("add", GET_SUB_REG(RSP, REG_SIZE), frame_size + padding);
+
 //		for (;param_pos > 0; param_pos--)
 //			this->put_instruction("pop", param_registers[param_pos - 1]); //todo: reload spilled
 		this->param_pos = 0;
-		this->store(i.ret, RAX);
+		if (!holds_alternative<std::monostate>(i.ret))
+			this->store(i.ret, GET_SUB_REG(RAX, REG_SIZE));
 	}
 
 	// load an address in RAX or RBX
-	void FunctionGenerator::load(const Register &reg, const TAC::Address &addr) {
-		const auto &location = get_address_location(addr);
+	void FunctionGenerator::load(const Operand &reg, Operand location) {
+		assert(reg.type == Operand::REGISTER); // todo
+
 		if (location.type == Operand::INDIRECT)
 		{
 
-			const auto &l_base = get_address_location(location.indirection->base);
-			const auto &l_index = get_address_location(location.indirection->index);
-			if (l_base.type == Operand::INDIRECT || l_index.type == Operand::INDIRECT)
+//			auto l_base = get_address_location(location.indirection->base);
+//			auto l_index = get_address_location(location.indirection->index);
+			if (location.indirection->base.type == Operand::INDIRECT || location.indirection->index.type == Operand::INDIRECT)
 			{
-				Indirection i = *location.indirection;
-				put_instruction("mov", GET_SUB_REG(reg, 8), l_base); // todo:  32bit
-				this->map(location.indirection->base, GET_SUB_REG(reg, 8));
-				put_instruction("mov", GET_SUB_REG(reg, this->size_of(location)), location);
+				this->load(GET_SUB_REG(reg.reg, REG_SIZE), location.indirection->base);
+//				put_instruction("mov", GET_SUB_REG(reg, REG_SIZE), location.indirection->base); // todo:  32bit
+//				this->map(location.indirection->base, GET_SUB_REG(reg, REG_SIZE));
+
+				location.indirection.reset(new Indirection(*location.indirection)); // todo: AAAAAAAAAAAAAAAAHHHHHHH!!!!!!!!!
+				location.indirection->base = GET_SUB_REG(reg.reg, REG_SIZE);
+//				l_base = get_address_location(location.indirection->base);
+//				l_index = get_address_location(location.indirection->index);
 				// todo: redo
 			}
-			else
-				put_instruction("mov", GET_SUB_REG(reg, this->size_of(location)), location);
+			move(reg, location);
+//			put_instruction("mov", GET_SUB_REG(reg, this->size_of(location)), location);
 		}
 		else
-			put_instruction("mov", GET_SUB_REG(reg, this->size_of(location)), location);
+			move(reg, location);
+//			put_instruction("mov", GET_SUB_REG(reg, this->size_of(location)), location);
 	}
 
-	void FunctionGenerator::store(const TAC::Address &address, const CodeGeneration::Register &reg) {
+	void FunctionGenerator::load(const Operand &reg, const TAC::Address &addr) {
+		this->load(reg, get_address_location(addr));
+	}
+
+	void FunctionGenerator::store(const TAC::Address &address, const CodeGeneration::Operand &reg) {
+		assert(reg.type == Operand::REGISTER); // todo
 		const auto &location = get_address_location(address);
 		if (location.type == Operand::INDIRECT)
 		{
-			const auto &l_base = get_address_location(location.indirection->base);
-			const auto &l_index = get_address_location(location.indirection->index);
-			if (l_base.type == Operand::INDIRECT || l_index.type == Operand::INDIRECT)
+//			const auto &l_base = get_address_location(location.indirection->base);
+//			const auto &l_index = get_address_location(location.indirection->index);
+			if (location.indirection->base.type == Operand::INDIRECT || location.indirection->index.type == Operand::INDIRECT)
 			{
-				// todo
+				this->load(GET_SUB_REG(RBX, PTR_SIZE), location.indirection->base); // todo: RBX?
+				location.indirection->base = GET_SUB_REG(RBX, PTR_SIZE);
+
 			}
-			else
-				put_instruction("mov", location, GET_SUB_REG(reg, this->size_of(location)));
+			move(location, reg);
+//			put_instruction("mov", location, GET_SUB_REG(reg, this->size_of(location)));
 		}
 		else
-			put_instruction("mov", location, GET_SUB_REG(reg, this->size_of(location)));
+			move(location, reg);
+//			put_instruction("mov", location, GET_SUB_REG(reg, this->size_of(location)));
 	}
 
-	void FunctionGenerator::move(const TAC::Address &dst, const TAC::Address &src) {
+//	void FunctionGenerator::move(const TAC::Address &dst, const TAC::Address &src) {
+	void FunctionGenerator::move(Operand l1, Operand l2) {
+		// todo check for address - address mov
+//		auto l1 = get_address_location(dst);
+//		auto l2 = get_address_location(src);
+		std::string opcode = "mov";
 
+		if (size_of(l1) > size_of(l2))
+		{
+			if (l2.is_signed)
+				opcode = "movsx"; // todo ?
+			else
+				opcode = "movzx";
+		}
+		else if (size_of(l1) < size_of(l2))
+		{
+			switch (l2.type)
+			{
+				case Operand::NONE:
+					assert(false);
+				case Operand::REGISTER:
+					l2 = Operand(GET_SUB_REG(l2.reg, size_of(l1)), l2.is_signed);
+					break;
+				case Operand::INDIRECT:
+					l2 = Operand(new Indirection(l2.indirection->base, l2.indirection->index, size_of(l1), l2.indirection->displacement), l2.is_signed);
+					break;
+				case Operand::DIRECT:
+					assert(false);
+				case Operand::IMMEDIATE:
+					break;
+			}
+		}
+		// todo else?
+
+		put_instruction(opcode.c_str(), l1, l2);
 	}
 
 	void FunctionGenerator::translate_instruction(const TAC::Instruction& i) {
 		this->instruction_to_asm.emplace_back(this->gen.get_lineno());
-		if (i.is_bop())
+
+//		i.print();
+
+		if (i.op == TAC::LOGICAL_AND || i.op == TAC::LOGICAL_OR || i.op == TAC::LOGICAL_NOT)
+			this->translate_logical_operator(i);
+		else if (i.is_bop())
 			this->translate_bop(i);
-		if (i.is_jump())
+		else if (i.is_oop())
+			this->translate_oop(i);
+		else if (i.is_jump())
 			this->translate_jump(i);
-		if (i.op == TAC::ASSIGN)
-			put_instruction("mov", get_address_location(i.ret), get_address_location(i.oper1));
-		if (i.op == TAC::RETURN)
+		else if (i.op == TAC::ASSIGN)
 		{
-			put_instruction("mov", GET_SUB_REG(RAX, size_of(i.oper1)), get_address_location(i.oper1));
+			Operand reg = {GET_SUB_REG(RAX, i.operation_size), i.operation_sign};
+			this->load(reg, i.oper1);
+			this->store(i.ret, reg);
+		}
+		else if (i.op == TAC::RETURN)
+		{
+			Operand reg = {GET_SUB_REG(RAX, i.operation_size), i.operation_sign};
+			this->load(reg, i.oper1);
 			this->leave();
 		}
-		if (i.op == TAC::PARAM)
+		else if (i.op == TAC::PARAM)
 			this->add_param(i);
-		if (i.op == TAC::CALL)
+		else if (i.op == TAC::CALL)
 			this->call(i);
-		if (i.op == TAC::DEREFERENCE)
-			this->map(i.ret, Operand(new Indirection{i.oper1, NULL_CONSTANT, size_of(i.oper1), 0}));
+		else if (i.op == TAC::DEREFERENCE)
+		{
+			this->load(GET_SUB_REG(RAX, size_of(i.oper1)), i.oper1);
 
+			auto op = alloc_temporary(PTR_SIZE);
+			move(op, GET_SUB_REG(RAX, size_of(i.oper1)));
+			size_t s = symbolTable.size_of(this->function.tac->temps[get<int>(i.ret)]);
+			this->add_mapping(i.ret, Operand(new Indirection{op, 0, s, 0}));
+		}
+		else if (i.op == TAC::ADDRESS)
+		{
+			auto location = get_address_location(i.oper1);
+			assert(location.type == Operand::INDIRECT);
+			if (location.indirection->base.type == Operand::INDIRECT)
+			{
+				this->load(GET_SUB_REG(RAX, PTR_SIZE), location.indirection->base);
+				location.indirection->base = GET_SUB_REG(RAX, PTR_SIZE);
+			}
+			this->put_instruction("lea", GET_SUB_REG(RAX, PTR_SIZE), location);
+			this->store(i.ret, GET_SUB_REG(RAX, PTR_SIZE));
+		}
+
+		this->gen.put("");
 	}
 
 	auto	FunctionGenerator::get_last_usage_pqueue() const
@@ -368,7 +609,7 @@ namespace CodeGeneration
 		const auto &v = function.tac->get_last_usages();
 		for (size_t i = 0; i < v.size(); i++)
 		{
-			std::cout << "last usage of t" << i << " at line " << v[i] << std::endl;
+//			std::cout << "last usage of t" << i << " at line " << v[i] << std::endl;
 			ret.emplace(v[i], i);
 		}
 		return ret;
@@ -380,13 +621,13 @@ namespace CodeGeneration
 		const auto &v = function.tac->labels;
 		for (size_t i = 0; i < v.size(); i++)
 		{
-			std::cout << "label l" << i << " at line " << v[i] << std::endl;
+//			std::cout << "label l" << i << " at line " << v[i] << std::endl;
 			ret.emplace(v[i], i);
 		}
 		return ret;
 	}
 
-	void FunctionGenerator::map(const TAC::Address &a, const CodeGeneration::Operand &o) {
+	void FunctionGenerator::map(const TAC::Address &a, const CodeGeneration::Operand &o) { //todo duplicate with add_mapping?
 		if(this->map_variables[a].type == Operand::REGISTER)
 		{
 			this->allocated_registers.erase(this->map_variables[a].reg);
@@ -404,34 +645,29 @@ namespace CodeGeneration
 		int i = 0;
 		for (auto *o : this->function.params)
 		{
-			std::cout << "param: " << o->name << " " << o << std::endl;
-			if (i < sizeof(param_registers) / sizeof (*param_registers))
-			{
-				std::cout << "register " << registers_strings[int(param_registers[i])] << std::endl;
-				this->map_variables[o] = param_registers[i];
-				this->available_registers.erase(param_registers[i]);
-				this->allocated_registers.insert({param_registers[i], this->map_variables.find(o)->first});
-			}
-			else this->map_variables[o] = Operand(new Indirection{"@rbp", NULL_CONSTANT, 8, -(ssize_t)(8 * (1 + i - sizeof(param_registers) / sizeof (*param_registers)))});
+//			std::cout << "param: " << o->name << " " << o << std::endl;
+			this->map_variables[o] = Operand(new Indirection{GET_SUB_REG(RBP, REG_SIZE), 0, symbolTable.size_of(o->type), (ssize_t)(REG_SIZE * (2 + i))});
 			i++;
 		}
 	}
 
 	void FunctionGenerator::translate() {
 		this->init_registers();
-		this->map_variables["@rbp"] = RBP;
+		this->map_variables["@rbp"] = GET_SUB_REG(RBP, REG_SIZE); // todo: try to remove and see if it break
 		this->map_params();
 		const auto & instructions = function.tac->get_instructions();
 		auto lupq = get_last_usage_pqueue();
 		auto lpq = get_labels_pqueue();
 		this->put_name();
 		this->enter();
-		this->spill_params();
+//		this->spill_params();
 		for ( size_t i = 0; i < instructions.size(); i++)
 		{
 			while (!lpq.empty() && lpq.top().first <= i)
 			{
-				this->gen.put(".L" + std::to_string(lpq.top().second) + ":");
+				if (!map_labels.contains(lpq.top().second))
+					map_labels[lpq.top().second] = gen.get_label();
+				this->gen.put(".L" + std::to_string(map_labels[lpq.top().second]) + ":");
 				lpq.pop();
 			}
 			std::cout.flush();
@@ -445,36 +681,30 @@ namespace CodeGeneration
 		}
 		while (!lpq.empty())
 		{
-			this->gen.put(".L" + std::to_string(lpq.top().second) + ":");
+			if (!map_labels.contains(lpq.top().second))
+				map_labels[lpq.top().second] = gen.get_label();
+			this->gen.put(".L" + std::to_string(map_labels[lpq.top().second]) + ":");
 			lpq.pop();
 		}
 		this->leave();
 	}
 
-	void FunctionGenerator::spill_params() {
-		for (int i = 0; i < this->function.params.size() && i < sizeof(param_registers) / sizeof (*param_registers); i++)
-			spill(param_registers[i]);
-	}
-
 	void FunctionGenerator::enter() {
-		this->put_instruction("push", RBP);
-		this->put_instruction("mov", RBP, RSP);
-		this->put_instruction("sub", RSP, this->frame_size);
-		this->put_instruction("push", RBX);
-		this->frame_size += 8;
+		this->put_instruction("push", GET_SUB_REG(RBP, REG_SIZE));
+		this->put_instruction("mov", GET_SUB_REG(RBP, REG_SIZE), GET_SUB_REG(RSP, REG_SIZE));
+		this->put_instruction("sub", GET_SUB_REG(RSP, REG_SIZE), this->function.frame_size);
+		this->put_instruction("push", GET_SUB_REG(RBX, REG_SIZE));
+		this->frame_size += REG_SIZE + this->function.frame_size;
 	}
 
 	void FunctionGenerator::leave() {
-		this->put_instruction("pop", RBX);
-		this->put_instruction("mov", RSP, RBP);
-		this->put_instruction("pop", RBP);
+		this->put_instruction("pop", GET_SUB_REG(RBX, REG_SIZE));
+		this->put_instruction("mov", GET_SUB_REG(RSP, REG_SIZE), GET_SUB_REG(RBP, REG_SIZE));
+		this->put_instruction("pop", GET_SUB_REG(RBP, REG_SIZE));
 		this->put_instruction("ret");
 	}
 
 	void FunctionGenerator::put_name() {
-		this->gen.put(".globl " + this->function.name);
-//		this->gen.put(".type " + this->function.tac->function.name + ", @function");
-		this->gen.put(this->function.name + ":");
 	}
 
 
@@ -496,16 +726,70 @@ namespace CodeGeneration
 		}
 	}
 
+	void FileGenerator::put_ordinary(const SymbolTable::Ordinary *o) {
+		int size = symbolTable.size_of(o->type);
+		// todo: align
+		if (!o->init)
+			this->put(".zero " + std::to_string(size));
+		else
+		{
+			auto init = o->init.value();
+			switch (init->value.index())
+			{
+				case 0:
+					this->put(".double " + std::to_string(get<0>(init->value)));
+					break;
+				case 1:
+					this->put(".long " + std::to_string(get<1>(init->value)));
+					break;
+				case 2:
+					this->put(".long .LC" + std::to_string(init->id));
+					break;
+			}
+		}
+	}
+
 	void FileGenerator::generate() {
 		this->put(".intel_syntax noprefix");
 		this->put(".text");
 		for (auto &sym : symbolTable.symbols)
 		{
-			std::cout << sym.name << std::endl;
+			if (sym.visibility == SymbolTable::Symbol::NONE)
+				continue;
+
+//			std::cout << sym.name << std::endl;
 			if (holds_alternative<SymbolTable::Function*>(sym.value))
+				this->put(".text");
+			else
+				this->put(".data"); // todo: bss
+
+			if (sym.size)
+				this->put(".size " + sym.name + ", " + std::to_string(sym.size));
+
+			//todo: asm type:
+			if (sym.visibility == SymbolTable::Symbol::GLOBAL)
 			{
-				get<SymbolTable::Function*>(sym.value)->tac->print();
-				CodeGeneration::FunctionGenerator(*get<SymbolTable::Function*>(sym.value), *this).translate();
+				this->put(".globl " + sym.name);
+			}
+			else
+				this->put(".local " + sym.name);
+			this->put(sym.name + ":");
+			switch (sym.value.index())
+			{
+				case 0:
+				{
+//					std::cout << "translating function " << sym.name << std::endl;
+//					std::cout << "============= TAC CODE ==============" << std::endl;
+//					get<SymbolTable::Function*>(sym.value)->tac->print();
+//					std::cout << "========== END OF TAC CODE ==========" << std::endl;
+					CodeGeneration::FunctionGenerator(*get<SymbolTable::Function*>(sym.value), *this).translate();
+				}
+				break;
+				case 1:
+				{
+					this->put_ordinary(get<SymbolTable::Ordinary*>(sym.value));
+				}
+				break;
 			}
 		}
 		for (auto &c : symbolTable.constants)

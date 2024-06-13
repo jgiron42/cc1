@@ -155,14 +155,13 @@ namespace CodeGeneration
 	}
 
 	Operand FunctionGenerator::get_address_location(const TAC::Address &addr) {
-		std::cout << "enter get_address_location" << std::endl;
-		if (holds_alternative<std::string>(addr))
-			std::cout << "get addr for " << get<std::string>(addr) << std::endl;
-		if (holds_alternative<SymbolTable::Ordinary *>(addr))
-			std::cout << "get addr for " << get<SymbolTable::Ordinary *>(addr)->name << " " << get<SymbolTable::Ordinary *>(addr) << std::endl;
+//		if (holds_alternative<std::string>(addr))
+//			std::cout << "get addr for " << get<std::string>(addr) << std::endl;
+//		if (holds_alternative<SymbolTable::Ordinary *>(addr))
+//			std::cout << "get addr for " << get<SymbolTable::Ordinary *>(addr)->name << " " << get<SymbolTable::Ordinary *>(addr) << std::endl;
 		if (auto it = this->map_variables.find(addr); it != this->map_variables.end())
 			return it->second;
-		std::cout << "zbeub " << std::endl;
+
 		return this->map_variables.insert({addr, address_to_operand(addr)}).first->second;
 	}
 
@@ -501,7 +500,7 @@ namespace CodeGeneration
 		this->put(".text");
 		for (auto &sym : symbolTable.symbols)
 		{
-			std::cout << sym.name << std::endl;
+//			std::cout << sym.name << std::endl;
 			if (holds_alternative<SymbolTable::Function*>(sym.value))
 			{
 				get<SymbolTable::Function*>(sym.value)->tac->print();

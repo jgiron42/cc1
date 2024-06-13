@@ -8,6 +8,7 @@
 #define BASE_REG(R) static_cast<Register>((static_cast<int>(R) & ~0b11))
 #define GET_SUB_REG(R, SIZE) static_cast<Register>(static_cast<int>(BASE_REG(R)) + ((SIZE) >= 2) + ((SIZE) >= 4) + ((SIZE) >= 8))
 #define CLEAN_REG(R) do {this->put_instruction("xor", GET_SUB_REG((R), 8), GET_SUB_REG((R), 8));} while(0)
+#define REG_SIZE 4
 
 namespace CodeGeneration
 {
@@ -63,14 +64,6 @@ namespace CodeGeneration
 			"QWORD",
 	};
 
-	static const Register param_registers[] = {
-		RDI,
-		RSI,
-		RDX,
-		RCX,
-		R8,
-		R9
-	};
 	struct Indirection;
 	struct Operand {
 		enum Type {
@@ -90,19 +83,23 @@ namespace CodeGeneration
 
 		std::shared_ptr<Indirection> indirection;
 
+		bool is_signed;
+
 		Operand() : type(NONE) {};
 		// init register
-		Operand(const Register &reg) : type(REGISTER), reg(reg) {};
+		Operand(const Register &reg, bool is_s = false) : type(REGISTER), reg(reg), is_signed(is_s) {};
 		// init indirection
-		explicit Operand(Indirection * const & i) : type(INDIRECT), indirection(i) {};
+		explicit Operand(Indirection * const & i, bool is_s = false) : type(INDIRECT), indirection(i), is_signed(is_s) {};
 		// init direct
-		Operand(const std::string &s) : type(DIRECT), label(s) {};
+		Operand(const std::string &s, bool is_s = false) : type(DIRECT), label(s), is_signed(is_s) {};
 		// init immediate
-		Operand(const uint64_t &i) : type(IMMEDIATE), immediate_value(i) {};
+		Operand(const uint64_t &i, bool is_s = false) : type(IMMEDIATE), immediate_value(i), is_signed(is_s) {};
 	};
 	struct Indirection {
-		TAC::Address	base;
-		TAC::Address	index;
+//		TAC::Address	base;
+//		TAC::Address	index;
+		Operand			base;
+		Operand			index;
 		size_t			scale;
 		ssize_t			displacement;
 	};
@@ -113,6 +110,8 @@ namespace CodeGeneration
 		int						line;
 		void					put(const std::string &);
 		void					put_constant(const SymbolTable::Constant *);
+		void					put_ordinary(const SymbolTable::Ordinary *);
+		int						get_label() {static int current = 0; return current++;};
 	public:
 		FileGenerator(std::ostream &);
 		void			generate();
@@ -125,39 +124,44 @@ namespace CodeGeneration
 		const SymbolTable::Function &function;
 		FileGenerator				&gen;
 
-		std::map<int, Register>							temp_to_register; // store the current register where is the temp
-		std::map<TAC::Address, Operand>					map_variables; // store the current register where is the temp
-		std::map<Register, const TAC::Address &, std::function<decltype(compare_reg)>>		allocated_registers; // todo rename
-		std::set<Register, std::function<decltype(compare_reg)>>							available_registers;
+		std::map<int, Register>															temp_to_register; // store the current register where is the temp
+		std::map<TAC::Address, Operand>													map_variables; // store the current register where is the temp
+		std::map<Register, const TAC::Address &, std::function<decltype(compare_reg)>>	allocated_registers; // todo rename
+		std::set<Register, std::function<decltype(compare_reg)> >						available_registers;
+		std::map<int, int>																map_labels; // map tac label id to file label id
 
 		size_t								frame_size;
 
 		std::vector<int>					instruction_to_asm; // store the position in the file of an instruction
 		int									param_pos = 0;
-		std::stack<Operand>					stack_args;
+		std::stack<TAC::Instruction>		stack_args;
 		void		init_registers();
+		std::map<TAC::Address, Operand>::iterator	add_mapping(const TAC::Address &addr, Operand &&op);
 		void		map_params();
 		void		map(const TAC::Address &, const Operand &);
 		Register	alloc_register(const std::optional<Register> & = std::nullopt);
 		void 		spill(const Register&);
 		void		free_register(Register);
+		Operand 	alloc_temporary(size_t size);
 		Operand		temp_to_operand(int);
 		Operand		get_address_location(const TAC::Address &);
 		Operand		address_to_operand(const TAC::Address &);
 		void		free_temp(int);
 		void		translate_instruction(const TAC::Instruction&);
 		void		translate_bop(const TAC::Instruction &);
+		void		translate_logical_operator(const TAC::Instruction &);
+		void		translate_oop(const TAC::Instruction &);
 		void		add_param(const TAC::Instruction &);
 		void		call(const TAC::Instruction &);
-		void		move(const TAC::Address &dst, const TAC::Address &src);
-		void		load(const Register &, const TAC::Address &);
-		void		store(const TAC::Address &, const Register &);
+		void		move(Operand l1, Operand l2);
+		void		load(const Operand &, const TAC::Address &);
+		void		load(const Operand &, Operand);
+		void		store(const TAC::Address &, const Operand &);
 		void		translate_jump(const TAC::Instruction &);
-		std::string	operand_to_string(const Operand &a);
+		std::string	operand_to_string(const Operand &a, bool);
 		std::string	indirection_to_string(const Indirection &);
 		std::string	operand_to_string(const TAC::Address &a);
 		void		put_instruction(const char *opcode, const Operand &a, const Operand &b);
-		void		spill_params();
 		void		enter();
 		void		leave();
 		void		put_name();

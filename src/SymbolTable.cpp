@@ -32,7 +32,7 @@ void SymbolTable::exit_function() {
 }
 
 int SymbolTable::enter_block() {
-	std::cout << "[enter block]";
+//	std::cout << "[enter block]";
 	if (block_stack.top()->blocks.size() >= this->block_pos_stack.top())
 		block_stack.top()->blocks.emplace_back();
 	this->block_stack.push(&this->block_stack.top()->blocks[this->block_pos_stack.top()]);
@@ -42,15 +42,15 @@ int SymbolTable::enter_block() {
 }
 
 void SymbolTable::exit_block() {
-	std::cout << "[exit block]";
+//	std::cout << "[exit block]";
 	this->block_stack.pop();
 	this->block_pos_stack.pop();
 }
 
 bool SymbolTable::insert_ordinary(const std::string &name, Ordinary o) {
-	std::cout << "[insert " << name << ", type: ";
-	this->print_type(o.type);
-	std::cout << "]";
+//	std::cout << "[insert " << name << ", type: ";
+//	this->print_type(o.type);
+//	std::cout << "]";
 
 	if (o.storage == Ordinary::Storage::UNDEFINED)
 	{
@@ -58,7 +58,13 @@ bool SymbolTable::insert_ordinary(const std::string &name, Ordinary o) {
 			o.storage = Ordinary::Storage::EXTERN;
 		else if (current_function)
 			o.storage = Ordinary::Storage::AUTO;
+		else if (prototype)
+			o.storage = Ordinary::PARAM;
+		else
+			o.storage = Ordinary::Storage::GLOBAL;
 	}
+	if (o.storage == Ordinary::STATIC)
+		o.name = name + "." + std::to_string(this->functions.size());
 //todo check storage
 
 	Scope *scope;
@@ -72,20 +78,23 @@ bool SymbolTable::insert_ordinary(const std::string &name, Ordinary o) {
 
 	if (current_function)
 	{
-		if (prototype)
+//		if (prototype)
+//		{
+//			assert(it->second.storage == Ordinary::UNDEFINED); // todo
+//			it->second.storage = SymbolTable::Ordinary::PARAM;
+//		} else
+		if (it->second.storage == Ordinary::Storage::AUTO)
 		{
-			assert(it->second.storage == Ordinary::UNDEFINED); // todo
-			it->second.storage = SymbolTable::Ordinary::PARAM;
+			current_function->frame_size += size_of(it->second.type);
+			it->second.offset = current_function->frame_size;
 		}
 		else
-			if (it->second.storage == Ordinary::Storage::AUTO)
-			{
-				current_function->frame_size += size_of(it->second.type);
-				it->second.offset = current_function->frame_size;
-			}
+			this->add_symbol(o.name, it->second);
 	}
-	else
-		this->add_symbol(name, it->second);
+	else if (!prototype)
+	{
+		this->add_symbol(o.name, it->second);
+	}
 
 	return true;
 }
@@ -161,6 +170,8 @@ size_t SymbolTable::size_of(const Types::CType &t) {
 		{
 			switch (get<0>(t.type).base)
 			{
+				case Types::PlainType::VOID:
+					return 1;
 				case Types::PlainType::CHAR:
 					return CHAR_SIZE;
 				case Types::PlainType::SHORT_INT:
@@ -185,7 +196,7 @@ size_t SymbolTable::size_of(const Types::CType &t) {
 		case 2: // Pointer
 			return PTR_SIZE;
 		case 3: // FunctionType
-			throw std::runtime_error("Can't take sizeof a function"); //todo: better
+			return PTR_SIZE; // todo warn?
 		case 4: // Array
 			if (!get<4>(t.type).size)
 				throw std::runtime_error("Can't take sizeof an incomplete array"); //todo: better
@@ -251,10 +262,16 @@ void SymbolTable::add_symbol(const std::string &name, SymbolTable::Ordinary &ord
 
 		sym.read_only = ordinary.type.qualifier & Types::CType::CONST;
 
-		if (ordinary.storage != Ordinary::STATIC)
+		if (ordinary.storage == Ordinary::STATIC)
+			sym.visibility = Symbol::LOCAL;
+		else if (ordinary.storage == Ordinary::GLOBAL)
 			sym.visibility = Symbol::GLOBAL;
+		else
+			sym.visibility = Symbol::NONE;
 
 		sym.value = &ordinary;
+
+		sym.size = this->size_of(ordinary.type);
 
 		this->symbols.emplace_back(sym);
 }

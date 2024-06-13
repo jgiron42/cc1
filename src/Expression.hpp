@@ -74,18 +74,23 @@ namespace Expression {
 	};
 
 	struct Node {
-		Operation								operation;
-		std::vector<Node>						operands;
-		std::optional<Types::CType>		typeArg; // used only by cast and sizeof
+		Operation									operation;
+		std::vector<Node>							operands;
+		std::optional<Types::CType>					typeArg; // used only by cast and sizeof
 		std::optional<const SymbolTable::Constant*>	constant;
-		std::optional<std::string>				identifier;
+		std::optional<std::string>					identifier;
 
 		std::optional<Types::CType>	type; // result type of the expression
 		TAC::Address						ret_address;
+		std::vector<Types::CType>	operand_types; // types
 	};
 
 	bool	type_equivalence(const Types::CType &t1, const Types::CType &t2, bool ignore_const);
+	bool	is_null(const Node &n);
 	void	DeduceOneType(Expression::Node &n);
 	void	DeduceType(Expression::Node &);
+	void	EmitTac(Expression::Node &n);
+	bool	is_convertible_to(const Types::CType &dst, const Types::CType &src);
+	void	evaluate_constant_expression(Expression::Node &n);
 }
 #endif //CC1_POC_EXPRESSION_HPP

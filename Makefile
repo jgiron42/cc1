@@ -7,7 +7,9 @@ SRCS =	parser.tab.cpp \
 		Expression.cpp \
 		TAC.cpp \
 		CodeGeneration.cpp \
+		Diagnostic.cpp \
 		CommandLine.cpp \
+		Types.cpp \
 		Ast.cpp
 
 SRCS_DIR = src

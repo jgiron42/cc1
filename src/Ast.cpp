@@ -11,8 +11,8 @@ namespace Ast {
 			auto base = parse_specifier_qualifier_list(d->declarationSpecifierList);
 			for (const auto &e: d->structDeclaratorList) {
 				Types::StructOrUnion::Entry *entry = &ret.members.emplace_back();
-				if (e.bitfield)
-					entry->bitfield = evaluate_constant_expression(e.bitfield.value());
+//				if (e.bitfield)
+//					entry->bitfield = evaluate_constant_expression(e.bitfield.value()); todo struct bitfield
 				if (e.declarator) {
 					auto [name, type, _] = parse_declarator(base, &e.declarator.value());
 					if (ret.member_map.contains(name.value()))
@@ -52,7 +52,7 @@ namespace Ast {
 	}
 
 	SymbolTable::Ordinary parse_declaration_specifier_list(const DeclarationSpecifierList &declarationSpecifierList) {
-		SymbolTable::Ordinary ordinary;
+		SymbolTable::Ordinary ordinary = {};
 
 		int storage_specifiers_count = std::count_if(declarationSpecifierList.begin(), declarationSpecifierList.end(),
 													 [](const DeclarationSpecifier &declarationSpecifier) -> bool {
@@ -84,21 +84,21 @@ namespace Ast {
 				ordinary.type.qualifier |= (Types::CType::TypeQualifier)std::get<TypeQualifier>(ds);
 		return ordinary;
 	}
-
-	int evaluate_constant_expression(const ConstantExpression &ce) {
-		return 42;
-		std::stack<const ConstantExpression *> s;
-		std::stack<int> values;
-		s.push(&ce);
-
-		while (!s.empty()) {
-//		switch (s.top()->operation)
-//		{
-//			case Expression::
+//
+//	int evaluate_constant_expression(const ConstantExpression &ce) {
+//		return Expression::evaluate_constant_expression(ce);
+//		std::stack<const ConstantExpression *> s;
+//		std::stack<int> values;
+//		s.push(&ce);
+//
+//		while (!s.empty()) {
+////		switch (s.top()->operation)
+////		{
+////			case Expression::
+////		}
 //		}
-		}
-		return values.top();
-	}
+//		return values.top();
+//	}
 
 /*
  * the goal of the following function is to reverse the scoping of the c parsing to reflect the actual operation nesting.
@@ -146,8 +146,9 @@ namespace Ast {
 						TypeQualifier::NONE
 				};
 				if (get<ArrayDeclarator>(*dd).constantExpression.has_value())
-					get<Types::Array>(base.type).size = evaluate_constant_expression(
-							get<ArrayDeclarator>(*dd).constantExpression.value());
+				{
+					get<Types::Array>(base.type).size = (get<uintmax_t>(get<ArrayDeclarator>(*dd).constantExpression.value().constant.value()->value));
+				}
 				dd = get<ArrayDeclarator>(*dd).directDeclarator.get();
 			} else if (holds_alternative<FunctionDeclarator>(*dd)) {
 				auto &functionDeclarator = get<FunctionDeclarator>(*dd);
@@ -233,6 +234,33 @@ namespace Ast {
 
 	void init(const std::string &name, const Types::CType &type, const Ast::Initializer &init)
 	{
+		auto *o = symbolTable.retrieve_ordinary(name);
+
+		// todo: array
+
+		auto n = get<Expression::Node>(init.value);
+
+		Expression::DeduceType(n);
+
+		assert(Expression::is_convertible_to(type, n.type.value()) || Expression::is_null(n));
+
+		if (n.operation == Expression::CONSTANT && o->storage != SymbolTable::Ordinary::AUTO && o->storage != SymbolTable::Ordinary::REGISTER)
+		{
+			o->init = n.constant.value();
+			return;
+		}
+
+		if (o->storage == SymbolTable::Ordinary::STATIC || o->storage == SymbolTable::Ordinary::GLOBAL)
+			assert(0); // todo
+
+		Expression::DeduceType(n);
+		Expression::Node tmp{Expression::ASSIGNMENT, {{Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, name, o->type, o}, n}};
+
+		tmp.type = tmp.operands[0].type.value();
+
+		Expression::EmitTac(tmp);
+		return;
+
 		switch (type.type.index())
 		{
 			case 0: // PlainType
@@ -240,9 +268,12 @@ namespace Ast {
 				switch (get<0>(type.type).base)
 				{
 					case Types::PlainType::VOID:
+						throw std::runtime_error("impossible"); // todo
 					case Types::PlainType::CHAR:
 					case Types::PlainType::SHORT_INT:
 					case Types::PlainType::INT:
+						TAC::currentFunction->add_instruction({symbolTable.retrieve_ordinary(name), TAC::ASSIGN, get<Expression::Node>(init.value).ret_address});
+						break;
 					case Types::PlainType::LONG_INT:
 					case Types::PlainType::FLOAT:
 					case Types::PlainType::DOUBLE:
@@ -256,6 +287,8 @@ namespace Ast {
 				//todo: tags
 				break;
 			case 2: // Pointer
+//				assert(is_pointer(get<Expression::Node>(init.value).type));
+				TAC::currentFunction->add_instruction({symbolTable.retrieve_ordinary(name), TAC::ASSIGN, get<Expression::Node>(init.value).ret_address});
 				throw std::runtime_error("unsupported");
 			case 3: // FunctionType
 				throw std::runtime_error("Can't assign a function"); //todo: better
@@ -268,20 +301,22 @@ namespace Ast {
 		}
 	}
 
-	void Declare(Declaration &declaration) {
+	void Declare(const Declaration &declaration) {
 		SymbolTable::Ordinary base = parse_declaration_specifier_list(declaration.specifiers);
 		if (!declaration.init)
 			return;
 		for (const auto &dcl: declaration.init.value()) {
 			auto [name, type, _] = parse_declarator(base.type, &dcl.declarator);
+			assert(!holds_alternative<Types::PlainType>(type.type) || get<Types::PlainType>(type.type).base != Types::PlainType::VOID);
 			if (name) {
 				if (!symbolTable.insert_ordinary(name.value(), {base.storage, type, name.value()}))
-					std::cout << "duplicate function: " << name.value() << std::endl;
+					std::cout << "duplicate symbol: " << name.value() << std::endl;
 			}
 			if (dcl.initializer)
+			{
 				init(name.value(), type, dcl.initializer.value());
+			}
 			// todo duplicate
-			// todo: init;
 		}
 	}
 	void Declare(std::list<Declaration> &declaration) {
@@ -296,7 +331,7 @@ namespace Ast {
 						),
 				InitDeclaratorList{InitDeclarator{declaration.declarator}}
 		};
-		SymbolTable::Function f;
+		SymbolTable::Function f = {};
 		SymbolTable::Ordinary base = parse_declaration_specifier_list(tmp.specifiers);
 		auto [name, type, param_names] = parse_declarator(base.type, &declaration.declarator);
 		// todo: check if type is a function
@@ -330,7 +365,7 @@ namespace Ast {
 		f.name = name.value();
 		for (const auto &p : *param_names)
 			f.params.push_back(symbolTable.retrieve_ordinary(p));
-		std::cout << "enter " <<  f.name << std::endl;
+//		std::cout << "enter " <<  f.name << std::endl;
 		symbolTable.enter_function(f);
 		// todo duplicate
 		return name.value();

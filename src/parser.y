@@ -4,8 +4,12 @@
 #include <string>
 #include "SymbolTable.hpp"
 #include "Ast.hpp"
+#include "CommandLine.hpp"
 int yyerror(char *s);
 int yyerror(const std::string &s);
+
+extern Ast::DeclarationSpecifierList current_declaration_specifier_list;
+
 %}
 
 %token <std::string> IDENTIFIER
@@ -117,6 +121,8 @@ int yyerror(const std::string &s);
 
 %%
 
+/* ==================================================== EXPRESSIONS ==================================================== */
+
 primary_expression
 	: IDENTIFIER {
 		auto ptr = symbolTable.retrieve_ordinary($1);
@@ -126,15 +132,16 @@ primary_expression
 			YYERROR;
 		}
 		if (ptr->storage == SymbolTable::Ordinary::EXTERN)
-			$$ = {Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, $1, ptr->type, $1/* + "@GOTPCREL[rip]"*/}; // todo: understand
+			$$ = {Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, $1, ptr->type, ptr}; // todo: understand
 		else if (ptr->storage == SymbolTable::Ordinary::STATIC)
-			$$ = {Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, $1, ptr->type, $1};
+			$$ = {Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, $1, ptr->type, ptr};
 		else
 			$$ = {Expression::IDENTIFIER, {}, std::nullopt, std::nullopt, $1, ptr->type, ptr};
+		$$.type->is_lvalue = true;
 	} /*todo*/
 	| CONSTANT {$$ = {Expression::CONSTANT, {}, std::nullopt, $1, {}, CTYPE_LONG_INT, $1};}
 	| FLOAT_CONSTANT {$$ = {Expression::CONSTANT, {}, std::nullopt, $1, {}, CTYPE_LONG_DOUBLE, $1};}
-	| STRING_LITERAL {$$ = {Expression::STRING_LITERAL, {}, std::nullopt, $1, {}, CTYPE_CHAR_PTR, $1};}
+	| STRING_LITERAL {$$ = {Expression::CONSTANT, {}, std::nullopt, $1, {}, CTYPE_CHAR_PTR, $1};}
 	| '(' expression ')' {$$ = $2;}
 	;
 
@@ -286,7 +293,7 @@ comma_expression
 	: assignment_expression {$$ = $1;}
 	| comma_expression ',' assignment_expression {$$ = {Expression::COMMA, {$1, $3}};}
 	;
-
+	
 expression
 	: comma_expression {Expression::DeduceType($1);$$ = $1;}
 	;
@@ -313,14 +320,15 @@ declaration_specifier
 	| type_qualifier {$$ = $1;}
 	;
 
+
 declaration_specifier_list
-	: declaration_specifier {$$ = Ast::DeclarationSpecifierList(1, $1);}
-	| declaration_specifier_list declaration_specifier  {$$ = $1; $$.emplace_back($2);}
+	: declaration_specifier {$$ = Ast::DeclarationSpecifierList(1, $1); current_declaration_specifier_list = $$;}
+	| declaration_specifier_list declaration_specifier  {$$ = $1; $$.emplace_back($2); current_declaration_specifier_list = $$;}
 	;
 
 init_declarator_list
-	: init_declarator {$$ = Ast::InitDeclaratorList(1, $1);}
-	| init_declarator_list ',' init_declarator {$$ = $1; $$.emplace_back($3);}
+	: init_declarator {$$ = Ast::InitDeclaratorList(1, $1);Ast::Declare(Ast::Declaration{$<Ast::DeclarationSpecifierList>0, {{$1}}});}
+	| init_declarator_list ',' init_declarator {$$ = $1; $$.emplace_back($3);Ast::Declare(Ast::Declaration{$<Ast::DeclarationSpecifierList>0, {{$3}}});}
 	;
 
 init_declarator
@@ -402,7 +410,7 @@ enumerator_list
 
 enumerator
 	: IDENTIFIER {$$ = {$1, std::nullopt};}
-	| IDENTIFIER '=' constant_expression {$$ = {$1, Ast::evaluate_constant_expression($3)};}
+	| IDENTIFIER '=' constant_expression {$$ = {$1, 0/*Expression::evaluate_constant_expression($3) todo enum*/};}
 	;
 
 type_qualifier
@@ -432,6 +440,7 @@ nested_declarator
 
 direct_declarator
 	: IDENTIFIER {$$ = $1;}
+	| TYPE_NAME {$$ = $1;}
 	| nested_declarator {$$ = $1;}
 	| array_declarator {$$ = $1;}
 	| function_declarator {$$ = $1;}
@@ -560,7 +569,8 @@ declaration_list
 	;
 
 declaration_list_declared
-	: declaration_list {$$ = $1; Ast::Declare($$);}
+	: declaration {$$ = {$1};/*Ast::Declare($$.back());*/}
+	| declaration_list_declared declaration {($$ = $1).emplace_back($2);/*Ast::Declare($$.back());*/}
 	;
 
 statement_list
@@ -570,7 +580,7 @@ statement_list
 
 expression_statement
 	: ';'  {$$ = {std::nullopt};}
-	| expression ';' {$$ = {$1};}
+	| expression ';' {$$ = {$1};Expression::EmitTac($1);}
 	;
 
 else
@@ -595,8 +605,9 @@ else
 selection_statement
 	: IF '(' expression ')'
 	{
+		Expression::EmitTac($3);
 		$<TAC::Label>$ = TAC::currentFunction->new_label();
-		TAC::currentFunction->add_instruction({$<TAC::Label>$, TAC::JUMP_EQUAL, $3.ret_address, symbolTable.new_constant(0)});
+		TAC::currentFunction->add_instruction({$<TAC::Label>$, TAC::JUMP_EQUAL, $3.ret_address, symbolTable.new_constant(0), symbolTable.size_of($3.type.value()), Types::is_signed($3.type.value())});
 	}
 	statement_ptr
 	else
@@ -611,20 +622,22 @@ iteration_statement
 	}
 	expression ')'
 	{
+		Expression::EmitTac($4);
 		$<TAC::Label>$ = TAC::currentFunction->new_label();
-		TAC::currentFunction->add_instruction({$<TAC::Label>$, TAC::JUMP_EQUAL, $4.ret_address, symbolTable.new_constant(0)});
+		TAC::currentFunction->add_instruction({$<TAC::Label>$, TAC::JUMP_EQUAL, $4.ret_address, symbolTable.new_constant(0), symbolTable.size_of($4.type.value()), Types::is_signed($4.type.value())});
 	}
 	statement_ptr
 	{
 		TAC::currentFunction->add_instruction({$<TAC::Label>3, TAC::JUMP});
-		std::cout << int($<TAC::Label>6) << std::endl;
+		//std::cout << int($<TAC::Label>6) << std::endl;
 		TAC::currentFunction->set_label($<TAC::Label>6);
 	}
 	{$$ = {Ast::IterationStatement::WHILE, $4, $7};}
 
 	| DO {$<TAC::Label>$ = TAC::currentFunction->new_label(true);} statement_ptr WHILE '(' expression ')' ';'
 	{
-	std::cout << "[label " << int($<TAC::Label>2) << "]" << std::endl;
+		Expression::EmitTac($6);
+	//std::cout << "[label " << int($<TAC::Label>2) << "]" << std::endl;
 		$$ = {Ast::IterationStatement::DO_WHILE, $6, $3};
 		TAC::currentFunction->add_instruction({$<TAC::Label>2, TAC::JUMP_NOT_EQUAL, $6.ret_address, symbolTable.new_constant(0)});
 	}
@@ -637,7 +650,10 @@ jump_statement
 	| CONTINUE ';' {$$ = {Ast::JumpStatement::CONTINUE};}
 	| BREAK ';' {$$ = {Ast::JumpStatement::BREAK};}
 	| RETURN ';' {$$ = {Ast::JumpStatement::RETURN};TAC::currentFunction->add_instruction({{}, TAC::RETURN});}
-	| RETURN expression ';' {$$ = {Ast::JumpStatement::RETURN, $2};TAC::currentFunction->add_instruction({{}, TAC::RETURN, $2.ret_address});}
+	| RETURN expression ';' {
+		Expression::EmitTac($2);
+		$$ = {Ast::JumpStatement::RETURN, $2};TAC::currentFunction->add_instruction({{}, TAC::RETURN, $2.ret_address, {}, symbolTable.size_of($2.type.value()), Types::is_signed($2.type.value())});
+	}
 	;
 
 translation_unit
@@ -647,7 +663,7 @@ translation_unit
 
 external_declaration
 	: function_definition {$$ = $1;}
-	| declaration {$$ = $1;Ast::Declare($1);}
+	| declaration {$$ = $1;/*Ast::Declare($1);*/}
 	;
 
 function_declaration_specifier_list
@@ -713,14 +729,15 @@ enter_function: {$$ = symbolTable.enter_block();symbolTable.enter_prototype();};
 %%
 
 #include <stdio.h>
+#include <regex>
+#include "Diagnostic.hpp"
 
 extern char yytext[];
-extern int column;
+Ast::DeclarationSpecifierList current_declaration_specifier_list;
 
 int yyerror(char *s)
 {
-	fflush(stdout);
-	return printf("\n%*s\n%*s\n", column, "^", column, s);
+	return Diagnostic::Error(s, Diagnostic::Error::ERROR).print();
 }
 
 int yyerror(const std::string &s)

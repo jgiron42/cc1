@@ -254,11 +254,13 @@ namespace Ast {
 	template <std::ranges::range R>
 	Types::CType	parse_specifier_qualifier_list(R &&range)
 	{
-		Types::CType ret;
+		Types::CType ret = {};
 
 		for (auto &ds : range)
 			if (holds_alternative<TypeQualifier>(ds))
-				ret.qualifier |= (Types::CType::TypeQualifier)std::get<TypeQualifier>(ds);
+			{
+				ret.qualifier |= (Types::CType::TypeQualifier)get<TypeQualifier>(ds);
+			}
 
 		auto type_specifier_range = range
 									| std::views::filter([](const DeclarationSpecifier &declarationSpecifier) -> bool {return holds_alternative<TypeSpecifier>(declarationSpecifier);})
@@ -310,7 +312,7 @@ namespace Ast {
 				plain.base = Types::PlainType::VOID;
 			if (array[TypeSpecifier::CHAR]) {
 				plain.base = Types::PlainType::CHAR;
-				plain.is_signed = false; // chars are defaulted to unsigned
+				plain.is_signed = true; // chars are defaulted to signed
 			} else if (array[TypeSpecifier::INT]) {
 				if (array[TypeSpecifier::SHORT])
 					plain.base = Types::PlainType::SHORT_INT;
@@ -340,13 +342,13 @@ namespace Ast {
 
 	bool					is_const_expression(const ConstantExpression &e);
 
-	int						evaluate_constant_expression(const ConstantExpression &ce);
+//	int						evaluate_constant_expression(const ConstantExpression &ce);
 
 	std::tuple<std::optional<std::string>, Types::CType, std::optional<std::list<std::string>>>	parse_declarator(Types::CType base, const Declarator *declarator);
 
 	Types::CType			parse_type_name(const TypeName &);
 
-	void					Declare(Declaration &declaration);
+	void					Declare(const Declaration &declaration);
 	void					Declare(std::list<Declaration> &declaration);
 	std::string				DeclareFunction(const FunctionDefinitionDeclaration &function);
 }

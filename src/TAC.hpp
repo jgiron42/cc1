@@ -35,6 +35,10 @@ namespace TAC {
 
 		ASSIGN,
 
+		NEG,
+
+		BITWISE_NOT,
+		LOGICAL_NOT,
 
 		DEREFERENCE,
 		ADDRESS,
@@ -76,8 +80,13 @@ namespace TAC {
 		Address					oper1;
 		Address					oper2;
 
+		size_t					operation_size;
+		bool					operation_sign;
+
 		bool is_bop() const;
+		bool is_oop() const;
 		bool is_jump() const;
+		void print() const;
 	};
 
 	class TacFunction {
@@ -89,6 +98,7 @@ namespace TAC {
 	public:
 		TacFunction(SymbolTable::Function &);
 		int					new_temp(const Types::CType &type);
+		void				set_temp_type(int id, const Types::CType &type);
 		Label				new_label(bool here = false);
 		void				set_label(const Label &); // set the label position at the current position in the program
 		void				add_instruction(const Instruction &i);

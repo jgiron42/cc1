@@ -14,22 +14,37 @@
 #include <variant>
 #include <assert.h>
 
+#define CTYPE_VOID Types::CType{Types::PlainType{Types::PlainType::VOID, false}}
 #define CTYPE_UNSIGNED_LONG_INT Types::CType{Types::PlainType{Types::PlainType::LONG_INT, false}}
 #define CTYPE_LONG_INT Types::CType{Types::PlainType{Types::PlainType::LONG_INT, true}}
 #define CTYPE_INT Types::CType{Types::PlainType{Types::PlainType::INT, true}}
+#define CTYPE_DOUBLE Types::CType{Types::PlainType{Types::PlainType::DOUBLE}}
 #define CTYPE_LONG_DOUBLE Types::CType{Types::PlainType{Types::PlainType::LONG_DOUBLE}}
 #define CTYPE_CHAR_PTR Types::CType{Types::Pointer{std::shared_ptr<Types::CType>(new Types::CType{Types::PlainType{Types::PlainType::CHAR, true}})}}
 
+//64
+//#define CHAR_SIZE 1
+//#define SHORT_INT_SIZE 2
+//#define INT_SIZE 4
+//#define LONG_INT_SIZE 8
+//#define FLOAT_SIZE 4
+//#define DOUBLE_SIZE 8
+//#define LONG_DOUBLE_SIZE 8
+//#define PTR_SIZE 8
+
+//32
 #define CHAR_SIZE 1
 #define SHORT_INT_SIZE 2
 #define INT_SIZE 4
-#define LONG_INT_SIZE 8
+#define LONG_INT_SIZE 4
 #define FLOAT_SIZE 4
 #define DOUBLE_SIZE 8
 #define LONG_DOUBLE_SIZE 8
-#define PTR_SIZE 8
+#define PTR_SIZE 4
+
 #define CONST(n) (symbolTable.new_constant(n))
 #define NULL_CONSTANT CONST(0)
+
 #include "Types.hpp"
 
 namespace TAC {
@@ -43,13 +58,13 @@ public:
 	{
 		Constant() {this->set_id();};
 		template <typename T,std::enable_if_t<std::is_integral<T>::value, bool> = true>
-		Constant(T val) : type(CTYPE_LONG_DOUBLE) {
+		Constant(T val) : type(CTYPE_LONG_INT) {
 			value.emplace<uintmax_t>(val);
 			this->set_id();
 		}
 
 		template <typename T,std::enable_if_t<std::is_floating_point<T>::value, bool> = true>
-		Constant(T val) : type(CTYPE_LONG_INT) {
+		Constant(T val) : type(CTYPE_DOUBLE) {
 			value.emplace<long double>(val);
 			this->set_id();
 		}
@@ -79,6 +94,7 @@ public:
 			UNDEFINED,
 			TYPEDEF,
 			STATIC,
+			GLOBAL,
 			AUTO,
 			REGISTER,
 			EXTERN,
@@ -88,7 +104,7 @@ public:
 		Types::CType			type;
 		std::string				name;
 		int						offset;
-		std::optional<Constant>	init;
+		std::optional<const Constant*>	init;
 		// location;
 	};
 
@@ -128,6 +144,7 @@ public:
 			Function*,
 			Ordinary*
 		> value;
+		size_t		size;
 	};
 
 
@@ -152,8 +169,8 @@ public:
 	void	enter_prototype();
 	void	exit_prototype();
 
-	int enter_block();
-	void exit_block();
+	int		enter_block();
+	void	exit_block();
 
 //	void insert_label();
 //	void insert_tag();

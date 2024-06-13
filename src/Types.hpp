@@ -89,9 +89,9 @@ namespace Types
 			VOLATILE = 1,
 			CONST = 2
 		};
-		friend inline TypeQualifier operator|(TypeQualifier a, TypeQualifier b)
+		friend inline TypeQualifier operator|(const TypeQualifier &a, const TypeQualifier &b)
 		{ return static_cast<TypeQualifier>(static_cast<int>(a) | static_cast<int>(b)); }
-		friend inline TypeQualifier operator|=(TypeQualifier a, TypeQualifier b) { return a = a | b; }
+		friend inline TypeQualifier operator|=(TypeQualifier &a, const TypeQualifier &b) { return (a = (a | b)); }
 		friend bool operator==(const CType &, const CType &) = default;
 		std::variant<
 		PlainType,
@@ -104,5 +104,7 @@ namespace Types
 		TypeQualifier	qualifier;
 		bool			is_lvalue;
 	};
+
+	bool is_signed(const CType &t);
 }
 #endif //CC1_POC_TYPES_HPP
